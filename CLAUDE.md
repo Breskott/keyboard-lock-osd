@@ -34,6 +34,12 @@
 5. 推送到远程仓库
 6. CI 自动构建并发布到 GitHub Releases
 
+**跳过交互确认**：在 CI 或非交互式环境中，使用 `-Force` 参数跳过确认提示：
+
+```powershell
+.\scripts\release.ps1 0.1.7 -Force
+```
+
 > 详细的发布规则、签名密钥管理和 CI 配置见 `AGENTS.md`。
 
 ## 技术栈

@@ -4,7 +4,8 @@
 
 param(
     [Parameter(Mandatory=$true)]
-    [string]$Version
+    [string]$Version,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -126,11 +127,15 @@ Write-Host ""
 git diff
 
 # 确认提交
-$confirm = Read-Host "确认提交并发布? (y/N)"
-if ($confirm -ne 'y' -and $confirm -ne 'Y') {
-    Write-Host "已取消" -ForegroundColor Yellow
-    git checkout HEAD -- package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
-    exit 0
+if (-not $Force) {
+    $confirm = Read-Host "确认提交并发布? (y/N)"
+    if ($confirm -ne 'y' -and $confirm -ne 'Y') {
+        Write-Host "已取消" -ForegroundColor Yellow
+        git checkout HEAD -- package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
+        exit 0
+    }
+} else {
+    Write-Host "跳过确认（-Force）" -ForegroundColor Yellow
 }
 
 # 本地构建验证
