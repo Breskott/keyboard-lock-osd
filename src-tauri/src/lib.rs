@@ -748,6 +748,10 @@ fn show_osd(app: &AppHandle, key: LockKey, enabled: bool) {
 
 fn reveal_osd_window(window: &tauri::WebviewWindow) {
     let _ = window.unminimize();
+    // 先移除再重新设置，强制触发 SetWindowPos(HWND_TOPMOST)。
+    // tao 的 set_always_on_top 仅在标志有变化时才调用 SetWindowPos，
+    // 若已经是 topmost 则是空操作，无法抢回被其他 TOPMOST 窗口夺走的 Z-order。
+    let _ = window.set_always_on_top(false);
     let _ = window.set_always_on_top(true);
     let _ = window.show();
 }
