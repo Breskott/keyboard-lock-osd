@@ -12,7 +12,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuBuilder},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    App, AppHandle, Emitter, Manager, Runtime, State,
+    App, AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_opener::OpenerExt;
@@ -26,14 +26,14 @@ use windows_sys::Win32::System::Console::{
 const OSD_WIDTH: u32 = 360;
 const OSD_HEIGHT: u32 = 118;
 const OSD_BOTTOM_GAP: i32 = 118;
+const OSD_LABEL_PREFIX: &str = "osd-";
 const AUTOSTART_ARG: &str = "--keyboard-lock-osd-autostart";
 const AUTOSTART_PREFERENCE_FILE: &str = "autostart-enabled.txt";
 const PROJECT_REPOSITORY_URL: &str = "https://github.com/coderDJing/keyboard-lock-osd";
 
 static KEY_EVENT_SENDER: OnceLock<Sender<KeyEvent>> = OnceLock::new();
 static OSD_PREFERENCES: OnceLock<Mutex<OsdPreferences>> = OnceLock::new();
-static OSD_READY: OnceLock<Mutex<bool>> = OnceLock::new();
-static PENDING_OSD_NOTICE: OnceLock<Mutex<Option<LockChangePayload>>> = OnceLock::new();
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 #[cfg(all(windows, debug_assertions))]
 static CONSOLE_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
@@ -367,12 +367,6 @@ fn osd_ready(
     context: State<'_, LaunchContext>,
     toast_state: State<'_, StartupTrayToastState>,
 ) {
-    mark_osd_ready();
-
-    if flush_pending_osd_notice(&app) {
-        return;
-    }
-
     if !matches!(context.source, LaunchSource::Manual)
         || !mark_startup_tray_toast_shown(&toast_state)
     {
@@ -416,19 +410,16 @@ pub fn run() {
                 shown: Mutex::new(false),
             });
 
+            let _ = APP_HANDLE.set(app.handle().clone());
+
             if let Some(icon) = app.default_window_icon().cloned() {
-                for label in ["settings", "osd"] {
-                    if let Some(window) = app.get_webview_window(label) {
-                        let _ = window.set_icon(icon.clone());
-                    }
+                if let Some(window) = app.get_webview_window("settings") {
+                    let _ = window.set_icon(icon.clone());
                 }
             }
 
-            if let Some(osd) = app.get_webview_window("osd") {
-                if let Err(error) = osd.set_ignore_cursor_events(true) {
-                    eprintln!("failed to enable OSD cursor passthrough: {error}");
-                }
-            }
+            // Create OSD windows for each monitor on the main thread
+            create_osd_windows_for_monitors(app.handle());
 
             install_tray(app)?;
             install_console_shutdown_handler(app.handle().clone());
@@ -531,18 +522,28 @@ fn mark_startup_tray_toast_shown(state: &StartupTrayToastState) -> bool {
 fn show_startup_tray_toast(app: &AppHandle) {
     let language = detect_system_language();
     let payload = startup_tray_toast_payload(language);
-    let Some(window) = app.get_webview_window("osd") else {
-        return;
+    let fullscreen_monitor_pos = if read_suppress_fullscreen_osd() {
+        fullscreen_monitor_position()
+    } else {
+        None
     };
+    let js = toast_eval_script(&payload);
 
-    if read_suppress_fullscreen_osd() && is_foreground_window_fullscreen() {
-        let _ = window.hide();
-        return;
+    for (_, window) in osd_windows(app) {
+        if let Some(monitor) = window.current_monitor().ok().flatten() {
+            if fullscreen_monitor_pos.is_some() && is_monitor_at_pos(&monitor, fullscreen_monitor_pos) {
+                let _ = window.hide();
+                continue;
+            }
+            let _ = position_osd_on_monitor(&window, &monitor);
+            reveal_osd_window(&window);
+            let w = window.clone();
+            let js_clone = js.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = w.eval(&js_clone);
+            });
+        }
     }
-
-    let _ = position_osd_window(&window);
-    let _ = app.emit_to("osd", "startup-tray-toast", &payload);
-    reveal_osd_window(&window);
 }
 
 fn startup_tray_toast_payload(language: UiLanguage) -> StartupToastPayload {
@@ -720,78 +721,49 @@ fn open_project_repository(app: &AppHandle) {
 }
 
 fn show_osd(app: &AppHandle, key: LockKey, enabled: bool) {
-    let Some(window) = app.get_webview_window("osd") else {
-        return;
-    };
-
-    if read_suppress_fullscreen_osd() && is_foreground_window_fullscreen() {
-        let _ = window.hide();
-        return;
-    }
-
     let payload = LockChangePayload::new(key, enabled);
-    let _ = position_osd_window(&window);
-
-    if !is_osd_ready() {
-        store_pending_osd_notice(payload);
-        return;
-    }
-
-    let _ = app.emit_to("osd", "lock-key-change", &payload);
-
-    reveal_osd_window(&window);
-}
-
-fn mark_osd_ready() {
-    if let Ok(mut ready) = OSD_READY.get_or_init(|| Mutex::new(false)).lock() {
-        *ready = true;
-    }
-}
-
-fn is_osd_ready() -> bool {
-    OSD_READY
-        .get_or_init(|| Mutex::new(false))
-        .lock()
-        .map(|ready| *ready)
-        .unwrap_or(false)
-}
-
-fn store_pending_osd_notice(payload: LockChangePayload) {
-    if let Ok(mut pending) = PENDING_OSD_NOTICE.get_or_init(|| Mutex::new(None)).lock() {
-        *pending = Some(payload);
-    }
-}
-
-fn flush_pending_osd_notice(app: &AppHandle) -> bool {
-    let payload = PENDING_OSD_NOTICE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|mut pending| pending.take());
-
-    let Some(payload) = payload else {
-        return false;
+    let fullscreen_monitor_pos = if read_suppress_fullscreen_osd() {
+        fullscreen_monitor_position()
+    } else {
+        None
     };
+    let js = osd_eval_script("lock", &payload);
 
-    let Some(window) = app.get_webview_window("osd") else {
-        return true;
-    };
-
-    if read_suppress_fullscreen_osd() && is_foreground_window_fullscreen() {
-        let _ = window.hide();
-        return true;
+    for (_, window) in osd_windows(app) {
+        if let Some(monitor) = window.current_monitor().ok().flatten() {
+            if fullscreen_monitor_pos.is_some() && is_monitor_at_pos(&monitor, fullscreen_monitor_pos) {
+                let _ = window.hide();
+                continue;
+            }
+            let _ = position_osd_on_monitor(&window, &monitor);
+            reveal_osd_window(&window);
+            let w = window.clone();
+            let js_clone = js.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = w.eval(&js_clone);
+            });
+        }
     }
-
-    let _ = position_osd_window(&window);
-    let _ = app.emit_to("osd", "lock-key-change", &payload);
-    reveal_osd_window(&window);
-    true
 }
 
 fn reveal_osd_window(window: &tauri::WebviewWindow) {
     let _ = window.unminimize();
     let _ = window.set_always_on_top(true);
     let _ = window.show();
+}
+
+fn osd_eval_script(kind: &str, payload: &LockChangePayload) -> String {
+    let json = serde_json::to_string(payload).unwrap_or_default();
+    format!(
+        "window.__KEYBOARD_LOCK_OSD_SHOW && window.__KEYBOARD_LOCK_OSD_SHOW({{kind:\"{kind}\",payload:{json}}})"
+    )
+}
+
+fn toast_eval_script(payload: &StartupToastPayload) -> String {
+    let json = serde_json::to_string(payload).unwrap_or_default();
+    format!(
+        "window.__KEYBOARD_LOCK_OSD_SHOW && window.__KEYBOARD_LOCK_OSD_SHOW({{kind:\"toast\",payload:{json}}})"
+    )
 }
 
 fn emit_lock_state_change(app: &AppHandle, key: LockKey, enabled: bool) {
@@ -920,11 +892,10 @@ fn preference_path(file_name: &str) -> PathBuf {
     base.join("Keyboard Lock OSD").join(file_name)
 }
 
-fn position_osd_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
-    let Some(monitor) = window.current_monitor()? else {
-        return Ok(());
-    };
-
+fn position_osd_on_monitor(
+    window: &tauri::WebviewWindow,
+    monitor: &tauri::Monitor,
+) -> tauri::Result<()> {
     let work_area = monitor.work_area();
     let scale_factor = monitor.scale_factor();
     let width = (OSD_WIDTH as f64 * scale_factor).round() as i32;
@@ -937,47 +908,167 @@ fn position_osd_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     window.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }))
 }
 
-#[cfg(target_os = "windows")]
-fn is_foreground_window_fullscreen() -> bool {
-    use std::mem::{size_of, zeroed};
-    use windows_sys::Win32::{
-        Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        },
-        UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic},
+
+fn osd_windows(app: &AppHandle) -> Vec<(String, tauri::WebviewWindow)> {
+    app.webview_windows()
+        .into_iter()
+        .filter(|(label, _)| {
+            label.starts_with(OSD_LABEL_PREFIX)
+                && label[OSD_LABEL_PREFIX.len()..]
+                    .chars()
+                    .all(|c| c.is_ascii_digit())
+        })
+        .collect()
+}
+
+
+fn create_osd_windows_for_monitors(app: &AppHandle) {
+    let Some(any_window) = app.get_webview_window("settings") else {
+        eprintln!("create_osd_windows_for_monitors: no settings window");
+        return;
     };
 
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.is_null() || IsIconic(hwnd) != 0 {
-            return false;
+    let monitors = match any_window.available_monitors() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("create_osd_windows_for_monitors: failed to get monitors: {e}");
+            return;
         }
+    };
 
-        if is_shell_desktop_window(hwnd) {
-            return false;
+    for (index, monitor) in monitors.iter().enumerate() {
+        let label = format!("{OSD_LABEL_PREFIX}{index}");
+        if let Some(window) = create_osd_window(app, &label) {
+            let _ = position_osd_on_monitor(&window, monitor);
         }
-
-        let Some(window_rect) = visible_window_rect(hwnd) else {
-            return false;
-        };
-
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        if monitor.is_null() {
-            return false;
-        }
-
-        let mut monitor_info = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
-            rcMonitor: zeroed(),
-            rcWork: zeroed(),
-            dwFlags: 0,
-        };
-        if GetMonitorInfoW(monitor, &mut monitor_info) == 0 {
-            return false;
-        }
-
-        rect_covers_monitor(window_rect, monitor_info.rcMonitor)
     }
+}
+
+fn create_osd_window(app: &AppHandle, label: &str) -> Option<tauri::WebviewWindow> {
+    let window = WebviewWindowBuilder::new(
+        app,
+        label,
+        WebviewUrl::App("index.html?view=osd".into()),
+    )
+    .title("Keyboard Lock OSD")
+    .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-crash-reporter --disable-breakpad")
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focusable(false)
+    .visible(true)
+    .inner_size(OSD_WIDTH as f64, OSD_HEIGHT as f64)
+    .resizable(false)
+    .build()
+    .ok()?;
+
+    if let Err(error) = window.set_ignore_cursor_events(true) {
+        eprintln!("failed to enable OSD cursor passthrough for {label}: {error}");
+    }
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        let _ = window.set_icon(icon);
+    }
+
+    Some(window)
+}
+
+fn sync_osd_windows(app: &AppHandle) {
+    let Some(any_window) = app.get_webview_window("settings") else {
+        return;
+    };
+
+    let monitors = match any_window.available_monitors() {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    for (index, monitor) in monitors.iter().enumerate() {
+        let label = format!("{OSD_LABEL_PREFIX}{index}");
+        if app.get_webview_window(&label).is_none() {
+            if let Some(window) = create_osd_window(app, &label) {
+                let _ = position_osd_on_monitor(&window, monitor);
+            }
+        }
+    }
+
+    let max_index = monitors.len();
+    for (label, window) in osd_windows(app) {
+        if let Some(index_str) = label.strip_prefix(OSD_LABEL_PREFIX) {
+            if let Ok(index) = index_str.parse::<usize>() {
+                if index >= max_index {
+                    let _ = window.destroy();
+                }
+            }
+        }
+    }
+}
+
+fn fullscreen_monitor_position() -> Option<tauri::PhysicalPosition<i32>> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::mem::{size_of, zeroed};
+        use windows_sys::Win32::{
+            Graphics::Gdi::{
+                GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+            },
+            UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic},
+        };
+
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() || IsIconic(hwnd) != 0 {
+                return None;
+            }
+
+            if is_shell_desktop_window(hwnd) {
+                return None;
+            }
+
+            let window_rect = visible_window_rect(hwnd)?;
+
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if monitor.is_null() {
+                return None;
+            }
+
+            let mut monitor_info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                rcMonitor: zeroed(),
+                rcWork: zeroed(),
+                dwFlags: 0,
+            };
+            if GetMonitorInfoW(monitor, &mut monitor_info) == 0 {
+                return None;
+            }
+
+            if rect_covers_monitor(window_rect, monitor_info.rcMonitor) {
+                Some(tauri::PhysicalPosition {
+                    x: monitor_info.rcMonitor.left,
+                    y: monitor_info.rcMonitor.top,
+                })
+            } else {
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+fn is_monitor_at_pos(
+    monitor: &tauri::Monitor,
+    target_pos: Option<tauri::PhysicalPosition<i32>>,
+) -> bool {
+    let Some(target) = target_pos else {
+        return false;
+    };
+    let pos = monitor.position();
+    pos.x == target.x && pos.y == target.y
 }
 
 #[cfg(target_os = "windows")]
@@ -1012,11 +1103,6 @@ fn visible_window_rect(
 
         Some(rect)
     }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn is_foreground_window_fullscreen() -> bool {
-    false
 }
 
 #[cfg(target_os = "windows")]
@@ -1211,8 +1297,19 @@ unsafe fn windows_raw_input_loop() {
         w_param: windows_sys::Win32::Foundation::WPARAM,
         l_param: windows_sys::Win32::Foundation::LPARAM,
     ) -> windows_sys::Win32::Foundation::LRESULT {
+        const WM_DISPLAYCHANGE: u32 = 0x007E;
+
         if msg == WM_INPUT {
             handle_raw_input(l_param as windows_sys::Win32::UI::Input::HRAWINPUT);
+        }
+
+        if msg == WM_DISPLAYCHANGE {
+            if let Some(app) = APP_HANDLE.get() {
+                let app_clone = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    sync_osd_windows(&app_clone);
+                });
+            }
         }
 
         DefWindowProcW(hwnd, msg, w_param, l_param)

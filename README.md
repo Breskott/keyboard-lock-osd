@@ -2,7 +2,7 @@
 
 [简体中文](./README.zh-CN.md)
 
-Keyboard Lock OSD is a lightweight Windows utility that shows a compact on-screen indicator for Caps Lock, Num Lock, and Scroll Lock changes. It stays in the system tray, reacts immediately to lock-key input, and keeps the current state visible without interrupting your typing flow.
+Keyboard Lock OSD is a lightweight Windows utility that shows a compact on-screen indicator for Caps Lock, Num Lock, and Scroll Lock changes. It stays in the system tray, reacts immediately to lock-key input, and keeps the current state visible across single-monitor and multi-monitor setups without interrupting your typing flow.
 
 ## Download
 
@@ -22,6 +22,7 @@ Keyboard Lock OSD is a lightweight Windows utility that shows a compact on-scree
 
 - Instant feedback for Caps Lock, Num Lock, and Scroll Lock state changes.
 - Compact bottom-center OSD overlay designed to stay out of the way.
+- Multi-monitor friendly: each connected display gets its own bottom-center OSD, with display changes synced automatically.
 - Per-key controls for choosing which lock keys should show an overlay.
 - Settings window with current key states and built-in overlay preview.
 - Tray-first startup with optional start at login.
@@ -40,6 +41,7 @@ Keyboard Lock OSD is a lightweight Windows utility that shows a compact on-scree
 
 - Laptop users whose keyboards do not have visible lock-key indicators.
 - External keyboard users who often miss Caps Lock or Num Lock changes.
+- Multi-monitor desktop users who want the state hint visible on every active screen.
 - Windows users who want clear lock-key feedback without interrupting input.
 
 ## Development

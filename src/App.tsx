@@ -34,7 +34,7 @@ type OsdEnabledMap = Record<LockKeyId, boolean>;
 
 declare global {
   interface Window {
-    __KEYBOARD_LOCK_OSD_SHOW?: (payload: LockChangePayload) => void;
+    __KEYBOARD_LOCK_OSD_SHOW?: (notice: OsdNotice) => void;
   }
 }
 
@@ -134,8 +134,8 @@ function OsdView() {
       }, duration);
     };
 
-    window.__KEYBOARD_LOCK_OSD_SHOW = (payload) =>
-      showNotice({ kind: "lock", payload });
+    window.__KEYBOARD_LOCK_OSD_SHOW = (nextNotice) =>
+      showNotice(nextNotice, nextNotice.kind === "toast" ? 2_400 : 1_150);
 
     const setup = async () => {
       const unlistenLock = await listen<LockChangePayload>(

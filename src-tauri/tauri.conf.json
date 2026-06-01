@@ -29,7 +29,7 @@
         "center": true
       },
       {
-        "label": "osd",
+        "label": "osd-placeholder",
         "title": "Keyboard Lock OSD",
         "url": "index.html?view=osd",
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-crash-reporter --disable-breakpad",
