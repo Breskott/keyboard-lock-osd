@@ -64,6 +64,12 @@ struct StartupToastPayload {
     message: &'static str,
 }
 
+#[derive(Serialize)]
+struct ToastPayload {
+    title: String,
+    message: String,
+}
+
 impl LaunchSource {
     fn current() -> Self {
         if args_include_autostart_marker(env::args()) {
@@ -231,6 +237,13 @@ impl UiLanguage {
         match self {
             Self::En => "Project Repository",
             Self::Zh => "项目地址",
+        }
+    }
+
+    fn tray_check_update(self) -> &'static str {
+        match self {
+            Self::En => "Check for Updates",
+            Self::Zh => "检查更新",
         }
     }
 
@@ -506,6 +519,52 @@ fn spawn_auto_update_check(app: AppHandle) {
     });
 }
 
+fn spawn_manual_update_check(app: AppHandle) {
+    let language = detect_system_language();
+
+    tauri::async_runtime::spawn(async move {
+        let (checking, found, not_found, failed, installing) = match language {
+            UiLanguage::En => ("Checking for updates...", "Update available", "Already up to date", "Update check failed", "Installing update..."),
+            UiLanguage::Zh => ("正在检查更新...", "发现新版本", "已是最新版本", "检查更新失败", "正在安装更新..."),
+        };
+
+        show_dynamic_toast(&app, "Keyboard Lock OSD", checking);
+
+        let updater = match app.updater() {
+            Ok(updater) => updater,
+            Err(error) => {
+                eprintln!("updater initialization failed: {error}");
+                show_dynamic_toast(&app, "Keyboard Lock OSD", failed);
+                return;
+            }
+        };
+
+        match updater.check().await {
+            Ok(Some(update)) => {
+                let version = update.version.clone();
+                let msg = format!("{found}: {version}");
+                show_dynamic_toast(&app, "Keyboard Lock OSD", &msg);
+
+                show_dynamic_toast(&app, "Keyboard Lock OSD", installing);
+                match update.download_and_install(|_, _| {}, || {}).await {
+                    Ok(()) => app.restart(),
+                    Err(error) => {
+                        eprintln!("update installation failed: {error}");
+                        show_dynamic_toast(&app, "Keyboard Lock OSD", failed);
+                    }
+                }
+            }
+            Ok(None) => {
+                show_dynamic_toast(&app, "Keyboard Lock OSD", not_found);
+            }
+            Err(error) => {
+                eprintln!("update check failed: {error}");
+                show_dynamic_toast(&app, "Keyboard Lock OSD", failed);
+            }
+        }
+    });
+}
+
 fn mark_startup_tray_toast_shown(state: &StartupTrayToastState) -> bool {
     let Ok(mut shown) = state.shown.lock() else {
         return false;
@@ -669,6 +728,7 @@ fn install_tray(app: &mut App) -> tauri::Result<()> {
         .tooltip("Keyboard Lock OSD")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show_settings" => show_settings_window(app),
+            "check_update" => spawn_manual_update_check(app.clone()),
             "project_repository" => open_project_repository(app),
             "quit" => app.exit(0),
             _ => {}
@@ -700,6 +760,7 @@ where
 {
     MenuBuilder::new(manager)
         .text("show_settings", language.tray_open_settings())
+        .text("check_update", language.tray_check_update())
         .text("project_repository", language.tray_project_repository())
         .separator()
         .text("quit", language.tray_quit())
@@ -768,6 +829,38 @@ fn toast_eval_script(payload: &StartupToastPayload) -> String {
     format!(
         "window.__KEYBOARD_LOCK_OSD_SHOW && window.__KEYBOARD_LOCK_OSD_SHOW({{kind:\"toast\",payload:{json}}})"
     )
+}
+
+fn show_dynamic_toast(app: &AppHandle, title: &str, message: &str) {
+    let payload = ToastPayload {
+        title: title.to_string(),
+        message: message.to_string(),
+    };
+    let json = serde_json::to_string(&payload).unwrap_or_default();
+    let js = format!(
+        "window.__KEYBOARD_LOCK_OSD_SHOW && window.__KEYBOARD_LOCK_OSD_SHOW({{kind:\"toast\",payload:{json}}})"
+    );
+    let fullscreen_monitor_pos = if read_suppress_fullscreen_osd() {
+        fullscreen_monitor_position()
+    } else {
+        None
+    };
+
+    for (_, window) in osd_windows(app) {
+        if let Some(monitor) = window.current_monitor().ok().flatten() {
+            if fullscreen_monitor_pos.is_some() && is_monitor_at_pos(&monitor, fullscreen_monitor_pos) {
+                let _ = window.hide();
+                continue;
+            }
+            let _ = position_osd_on_monitor(&window, &monitor);
+            reveal_osd_window(&window);
+            let w = window.clone();
+            let js_clone = js.clone();
+            let _ = app.run_on_main_thread(move || {
+                let _ = w.eval(&js_clone);
+            });
+        }
+    }
 }
 
 fn emit_lock_state_change(app: &AppHandle, key: LockKey, enabled: bool) {
