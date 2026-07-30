@@ -1306,7 +1306,9 @@ fn fullscreen_monitor_position() -> Option<tauri::PhysicalPosition<i32>> {
             Graphics::Gdi::{
                 GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
             },
-            UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic},
+            UI::WindowsAndMessaging::{
+                GetForegroundWindow, GetWindowLongW, IsIconic, GWL_STYLE, WS_MAXIMIZE,
+            },
         };
 
         unsafe {
@@ -1316,6 +1318,13 @@ fn fullscreen_monitor_position() -> Option<tauri::PhysicalPosition<i32>> {
             }
 
             if is_shell_desktop_window(hwnd) {
+                return None;
+            }
+
+            // A maximized window is not "fullscreen" for OSD purposes — users
+            // still want lock-key feedback while typing in maximized apps.
+            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            if style & WS_MAXIMIZE != 0 {
                 return None;
             }
 
