@@ -37,8 +37,6 @@ const PROJECT_REPOSITORY_URL: &str = "https://github.com/coderDJing/keyboard-loc
 static KEY_EVENT_SENDER: OnceLock<Sender<KeyEvent>> = OnceLock::new();
 static OSD_PREFERENCES: OnceLock<Mutex<OsdPreferences>> = OnceLock::new();
 static LOCK_STATE_SNAPSHOT: OnceLock<Mutex<LockSnapshot>> = OnceLock::new();
-static HOOK_EVENT_TIMES: OnceLock<Mutex<[Option<Instant>; 3]>> = OnceLock::new();
-static POLL_UPDATE_TIMES: OnceLock<Mutex<[Option<Instant>; 3]>> = OnceLock::new();
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 #[cfg(all(windows, debug_assertions))]
 static CONSOLE_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -158,14 +156,6 @@ impl LockKey {
 
     fn all() -> [Self; 3] {
         [Self::Caps, Self::Num, Self::Scroll]
-    }
-
-    fn index(self) -> usize {
-        match self {
-            Self::Caps => 0,
-            Self::Num => 1,
-            Self::Scroll => 2,
-        }
     }
 }
 
@@ -791,26 +781,22 @@ fn start_keyboard_listener(app: AppHandle) -> Result<(), String> {
 
             match event.kind {
                 KeyEventKind::Down => {
-                    mark_hook_event(event.key);
-                    if recent_poll_update(event.key) {
-                        continue;
-                    }
-                    let enabled = !snapshot_get(event.key);
-                    snapshot_set(event.key, enabled);
-                    emit_lock_state_change(&listener_app, event.key, enabled);
-                    if read_osd_enabled(event.key) {
-                        show_osd(&listener_app, event.key, enabled);
-                    }
-                }
-                KeyEventKind::Up => {
-                    mark_hook_event(event.key);
-                    let previous = snapshot_get(event.key);
+                    // Wait briefly for the OS to apply the toggle, then read
+                    // the physical truth instead of assuming a blind toggle.
+                    // If the 100ms poller already applied this press, the
+                    // snapshot matches and nothing fires (no double OSD, no
+                    // inverted state).
+                    thread::sleep(Duration::from_millis(10));
                     let enabled = is_lock_enabled(event.key);
-                    snapshot_set(event.key, enabled);
-                    if enabled != previous {
+                    if enabled != snapshot_get(event.key) {
+                        snapshot_set(event.key, enabled);
                         emit_lock_state_change(&listener_app, event.key, enabled);
+                        if read_osd_enabled(event.key) {
+                            show_osd(&listener_app, event.key, enabled);
+                        }
                     }
                 }
+                KeyEventKind::Up => {}
             }
         }
     });
@@ -856,66 +842,22 @@ fn snapshot_set(key: LockKey, enabled: bool) {
     }
 }
 
-fn mark_hook_event(key: LockKey) {
-    if let Ok(mut times) = HOOK_EVENT_TIMES
-        .get_or_init(|| Mutex::new([None; 3]))
-        .lock()
-    {
-        times[key.index()] = Some(Instant::now());
-    }
-}
-
-fn recent_hook_event(key: LockKey) -> bool {
-    HOOK_EVENT_TIMES
-        .get_or_init(|| Mutex::new([None; 3]))
-        .lock()
-        .map(|times| {
-            times[key.index()]
-                .map(|t| t.elapsed() < Duration::from_millis(250))
-                .unwrap_or(false)
-        })
-        .unwrap_or(false)
-}
-
-fn mark_poll_update(key: LockKey) {
-    if let Ok(mut times) = POLL_UPDATE_TIMES
-        .get_or_init(|| Mutex::new([None; 3]))
-        .lock()
-    {
-        times[key.index()] = Some(Instant::now());
-    }
-}
-
-fn recent_poll_update(key: LockKey) -> bool {
-    POLL_UPDATE_TIMES
-        .get_or_init(|| Mutex::new([None; 3]))
-        .lock()
-        .map(|times| {
-            times[key.index()]
-                .map(|t| t.elapsed() < Duration::from_millis(250))
-                .unwrap_or(false)
-        })
-        .unwrap_or(false)
-}
-
-/// Polls the physical lock-key state with GetAsyncKeyState.
-/// This works even when an elevated window (e.g. an admin terminal) has
-/// focus, where the low-level keyboard hook is blocked by UIPI. The hook
-/// remains the primary path; the poller only fires when the hook missed
-/// a change (detected as a diff against the shared snapshot).
+/// Polls the physical lock-key state with GetAsyncKeyState every 100ms.
+/// This is the authoritative state source: it works even when an elevated
+/// window (e.g. an admin terminal) has focus, where the low-level keyboard
+/// hook is blocked by UIPI. When the hook path already applied a change,
+/// the snapshot matches and the poller stays silent; when the hook missed
+/// the change, the poller applies it and shows the OSD. No suppression
+/// windows are needed because the poller only acts on real divergence.
 fn spawn_lock_state_poller(app: AppHandle) {
     let _ = thread::Builder::new()
         .name("lock-state-poller".to_string())
         .spawn(move || loop {
             thread::sleep(Duration::from_millis(100));
             for key in LockKey::all() {
-                let enabled = is_lock_toggled(key);
+                let enabled = is_lock_enabled(key);
                 if enabled != snapshot_get(key) {
-                    if recent_hook_event(key) {
-                        continue;
-                    }
                     snapshot_set(key, enabled);
-                    mark_poll_update(key);
                     emit_lock_state_change(&app, key, enabled);
                     if read_osd_enabled(key) {
                         show_osd(&app, key, enabled);
@@ -1593,23 +1535,15 @@ fn rect_has_area(rect: windows_sys::Win32::Foundation::RECT) -> bool {
 fn is_lock_enabled(key: LockKey) -> bool {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 
+    // GetKeyState's low bit is the documented toggle state for lock keys
+    // (Caps/Num/Scroll). GetAsyncKeyState's low bit instead means "pressed
+    // since the previous call" and must NOT be used for toggle state —
+    // doing so reports ON/OFF inverted on alternating polls.
     unsafe { GetKeyState(vk_code(key)) & 1 != 0 }
 }
 
 #[cfg(not(target_os = "windows"))]
 fn is_lock_enabled(_key: LockKey) -> bool {
-    false
-}
-
-#[cfg(target_os = "windows")]
-fn is_lock_toggled(key: LockKey) -> bool {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-
-    unsafe { GetAsyncKeyState(vk_code(key)) & 1 != 0 }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn is_lock_toggled(_key: LockKey) -> bool {
     false
 }
 
