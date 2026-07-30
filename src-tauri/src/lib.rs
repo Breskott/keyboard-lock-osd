@@ -30,11 +30,15 @@ const OSD_LABEL_PREFIX: &str = "osd-";
 const AUTOSTART_ARG: &str = "--keyboard-lock-osd-autostart";
 const AUTOSTART_PREFERENCE_FILE: &str = "autostart-enabled.txt";
 const OSD_POSITION_PREFERENCE_FILE: &str = "osd-position.txt";
+const OSD_DURATION_PREFERENCE_FILE: &str = "osd-duration.txt";
 const THEME_PREFERENCE_FILE: &str = "theme.json";
 const PROJECT_REPOSITORY_URL: &str = "https://github.com/coderDJing/keyboard-lock-osd";
 
 static KEY_EVENT_SENDER: OnceLock<Sender<KeyEvent>> = OnceLock::new();
 static OSD_PREFERENCES: OnceLock<Mutex<OsdPreferences>> = OnceLock::new();
+static LOCK_STATE_SNAPSHOT: OnceLock<Mutex<LockSnapshot>> = OnceLock::new();
+static HOOK_EVENT_TIMES: OnceLock<Mutex<[Option<Instant>; 3]>> = OnceLock::new();
+static POLL_UPDATE_TIMES: OnceLock<Mutex<[Option<Instant>; 3]>> = OnceLock::new();
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 #[cfg(all(windows, debug_assertions))]
 static CONSOLE_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -154,6 +158,14 @@ impl LockKey {
 
     fn all() -> [Self; 3] {
         [Self::Caps, Self::Num, Self::Scroll]
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Caps => 0,
+            Self::Num => 1,
+            Self::Scroll => 2,
+        }
     }
 }
 
@@ -344,6 +356,7 @@ struct LockChangePayload {
     abbreviation: &'static str,
     icon: &'static str,
     enabled: bool,
+    duration_ms: u64,
 }
 
 impl LockChangePayload {
@@ -354,6 +367,7 @@ impl LockChangePayload {
             abbreviation: key.abbreviation(),
             icon: key.icon(),
             enabled,
+            duration_ms: read_osd_duration(),
         }
     }
 }
@@ -439,6 +453,20 @@ fn set_osd_position(app: AppHandle, position: String) -> Result<(), String> {
 #[tauri::command]
 fn current_theme() -> Theme {
     read_theme()
+}
+
+#[tauri::command]
+fn current_osd_duration() -> u64 {
+    read_osd_duration()
+}
+
+#[tauri::command]
+fn set_osd_duration(duration_ms: u64) -> Result<(), String> {
+    if !(500..=10_000).contains(&duration_ms) {
+        return Err(format!("Duration out of range: {duration_ms}"));
+    }
+    write_osd_duration(duration_ms);
+    Ok(())
 }
 
 #[tauri::command]
@@ -561,6 +589,8 @@ pub fn run() {
             set_osd_position,
             current_theme,
             set_theme,
+            current_osd_duration,
+            set_osd_duration,
             current_autostart_enabled,
             set_autostart_enabled,
             current_language,
@@ -736,15 +766,15 @@ fn startup_tray_toast_payload(language: UiLanguage) -> StartupToastPayload {
 }
 
 fn start_keyboard_listener(app: AppHandle) -> Result<(), String> {
-    let initial_state = LockSnapshot::read();
+    initialize_lock_snapshot();
 
     let (tx, rx) = mpsc::channel::<KeyEvent>();
     KEY_EVENT_SENDER
         .set(tx)
         .map_err(|_| "keyboard listener is already running".to_string())?;
 
+    let listener_app = app.clone();
     thread::spawn(move || {
-        let mut state = initial_state;
         let mut last_event: Option<(LockKey, KeyEventKind, Instant)> = None;
 
         for event in rx {
@@ -761,24 +791,31 @@ fn start_keyboard_listener(app: AppHandle) -> Result<(), String> {
 
             match event.kind {
                 KeyEventKind::Down => {
-                    let enabled = !state.get(event.key);
-                    state.set(event.key, enabled);
-                    emit_lock_state_change(&app, event.key, enabled);
+                    mark_hook_event(event.key);
+                    if recent_poll_update(event.key) {
+                        continue;
+                    }
+                    let enabled = !snapshot_get(event.key);
+                    snapshot_set(event.key, enabled);
+                    emit_lock_state_change(&listener_app, event.key, enabled);
                     if read_osd_enabled(event.key) {
-                        show_osd(&app, event.key, enabled);
+                        show_osd(&listener_app, event.key, enabled);
                     }
                 }
                 KeyEventKind::Up => {
-                    let previous = state.get(event.key);
+                    mark_hook_event(event.key);
+                    let previous = snapshot_get(event.key);
                     let enabled = is_lock_enabled(event.key);
-                    state.set(event.key, enabled);
+                    snapshot_set(event.key, enabled);
                     if enabled != previous {
-                        emit_lock_state_change(&app, event.key, enabled);
+                        emit_lock_state_change(&listener_app, event.key, enabled);
                     }
                 }
             }
         }
     });
+
+    spawn_lock_state_poller(app.clone());
 
     let hook_result = spawn_keyboard_hook_thread();
     let raw_input_result = spawn_raw_input_thread();
@@ -796,6 +833,96 @@ fn start_keyboard_listener(app: AppHandle) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn initialize_lock_snapshot() {
+    let _ = LOCK_STATE_SNAPSHOT.get_or_init(|| Mutex::new(LockSnapshot::read()));
+}
+
+fn snapshot_get(key: LockKey) -> bool {
+    LOCK_STATE_SNAPSHOT
+        .get_or_init(|| Mutex::new(LockSnapshot::read()))
+        .lock()
+        .map(|snapshot| snapshot.get(key))
+        .unwrap_or(false)
+}
+
+fn snapshot_set(key: LockKey, enabled: bool) {
+    if let Ok(mut snapshot) = LOCK_STATE_SNAPSHOT
+        .get_or_init(|| Mutex::new(LockSnapshot::read()))
+        .lock()
+    {
+        snapshot.set(key, enabled);
+    }
+}
+
+fn mark_hook_event(key: LockKey) {
+    if let Ok(mut times) = HOOK_EVENT_TIMES
+        .get_or_init(|| Mutex::new([None; 3]))
+        .lock()
+    {
+        times[key.index()] = Some(Instant::now());
+    }
+}
+
+fn recent_hook_event(key: LockKey) -> bool {
+    HOOK_EVENT_TIMES
+        .get_or_init(|| Mutex::new([None; 3]))
+        .lock()
+        .map(|times| {
+            times[key.index()]
+                .map(|t| t.elapsed() < Duration::from_millis(250))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+fn mark_poll_update(key: LockKey) {
+    if let Ok(mut times) = POLL_UPDATE_TIMES
+        .get_or_init(|| Mutex::new([None; 3]))
+        .lock()
+    {
+        times[key.index()] = Some(Instant::now());
+    }
+}
+
+fn recent_poll_update(key: LockKey) -> bool {
+    POLL_UPDATE_TIMES
+        .get_or_init(|| Mutex::new([None; 3]))
+        .lock()
+        .map(|times| {
+            times[key.index()]
+                .map(|t| t.elapsed() < Duration::from_millis(250))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// Polls the physical lock-key state with GetAsyncKeyState.
+/// This works even when an elevated window (e.g. an admin terminal) has
+/// focus, where the low-level keyboard hook is blocked by UIPI. The hook
+/// remains the primary path; the poller only fires when the hook missed
+/// a change (detected as a diff against the shared snapshot).
+fn spawn_lock_state_poller(app: AppHandle) {
+    let _ = thread::Builder::new()
+        .name("lock-state-poller".to_string())
+        .spawn(move || loop {
+            thread::sleep(Duration::from_millis(100));
+            for key in LockKey::all() {
+                let enabled = is_lock_toggled(key);
+                if enabled != snapshot_get(key) {
+                    if recent_hook_event(key) {
+                        continue;
+                    }
+                    snapshot_set(key, enabled);
+                    mark_poll_update(key);
+                    emit_lock_state_change(&app, key, enabled);
+                    if read_osd_enabled(key) {
+                        show_osd(&app, key, enabled);
+                    }
+                }
+            }
+        });
 }
 
 fn crop_to_content(icon: tauri::image::Image<'_>) -> tauri::image::Image<'static> {
@@ -1200,6 +1327,25 @@ fn theme_preference_path() -> PathBuf {
     preference_path(THEME_PREFERENCE_FILE)
 }
 
+fn read_osd_duration() -> u64 {
+    let raw = fs::read_to_string(osd_duration_preference_path()).ok();
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|v| (500..=10_000).contains(v))
+        .unwrap_or(1_400)
+}
+
+fn write_osd_duration(duration_ms: u64) {
+    let path = osd_duration_preference_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, duration_ms.to_string());
+}
+
+fn osd_duration_preference_path() -> PathBuf {
+    preference_path(OSD_DURATION_PREFERENCE_FILE)
+}
+
 
 fn osd_windows(app: &AppHandle) -> Vec<(String, tauri::WebviewWindow)> {
     app.webview_windows()
@@ -1452,6 +1598,18 @@ fn is_lock_enabled(key: LockKey) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 fn is_lock_enabled(_key: LockKey) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn is_lock_toggled(key: LockKey) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+
+    unsafe { GetAsyncKeyState(vk_code(key)) & 1 != 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_lock_toggled(_key: LockKey) -> bool {
     false
 }
 

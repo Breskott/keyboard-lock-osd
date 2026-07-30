@@ -91,7 +91,7 @@ button {
   height: 96px;
   min-width: 240px;
   opacity: 0;
-  padding: 14px 22px 14px 16px;
+  padding: 14px 18px;
   transform: translateY(14px) scale(0.96);
   transition:
     opacity 180ms ease-out,
@@ -120,10 +120,12 @@ button {
 }
 
 .osd-copy {
-  align-items: center;
+  align-content: center;
   display: grid;
+  flex: 1 1 auto;
   gap: 2px;
   justify-items: center;
+  min-width: 0;
   text-align: center;
 }
 
@@ -593,6 +595,50 @@ button {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+/* ----- duration row ----- */
+
+.duration-row {
+  align-items: center;
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  display: flex;
+  gap: 12px;
+  margin: 0 auto 10px;
+  max-width: 760px;
+  padding: 10px 12px;
+}
+
+.duration-row-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.duration-row input[type="range"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex: 1 1 auto;
+  height: 18px;
+  margin: 0;
+  min-width: 60px;
+}
+
+.duration-row-value {
+  color: var(--text-primary);
+  font-family:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  min-width: 42px;
+  text-align: right;
+  white-space: nowrap;
 }
 
 /* ----- key rows (fixed grid for PT-BR etc.) ----- */

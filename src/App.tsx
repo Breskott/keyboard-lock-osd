@@ -46,6 +46,7 @@ type LockChangePayload = {
   abbreviation: string;
   icon: LockKeyId;
   enabled: boolean;
+  durationMs?: number;
 };
 
 type StartupToastPayload = {
@@ -128,6 +129,7 @@ const copy = {
     theme: "Theme",
     themeCustom: "Custom",
     customColor: "Custom color",
+    duration: "Display time",
   },
   zh: {
     title: "Keyboard Lock OSD",
@@ -151,6 +153,7 @@ const copy = {
     theme: "主题",
     themeCustom: "自定义",
     customColor: "自定义颜色",
+    duration: "显示时长",
   },
   pt: {
     title: "Indicador de Teclas de Bloqueio",
@@ -174,6 +177,7 @@ const copy = {
     theme: "Tema",
     themeCustom: "Personalizado",
     customColor: "Cor personalizada",
+    duration: "Tempo na tela",
   },
 };
 
@@ -286,13 +290,21 @@ function OsdView() {
     };
 
     window.__KEYBOARD_LOCK_OSD_SHOW = (nextNotice) =>
-      showNotice(nextNotice, nextNotice.kind === "toast" ? 2_400 : 1_400);
+      showNotice(
+        nextNotice,
+        nextNotice.kind === "toast"
+          ? 2_400
+          : (nextNotice.payload.durationMs ?? 1_400),
+      );
 
     const setup = async () => {
       const unlistenLock = await listen<LockChangePayload>(
         "lock-key-change",
         (event) => {
-          showNotice({ kind: "lock", payload: event.payload });
+          showNotice(
+            { kind: "lock", payload: event.payload },
+            event.payload.durationMs ?? 1_400,
+          );
         },
       );
       const unlistenToast = await listen<StartupToastPayload>(
@@ -364,6 +376,7 @@ function SettingsView() {
   );
   const [osdPosition, setOsdPosition] = useState<OsdPositionId>("bottomCenter");
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
+  const [osdDuration, setOsdDuration] = useState<number>(1_400);
   const text = copy[language];
 
   useEffect(() => {
@@ -430,6 +443,16 @@ function SettingsView() {
   }, []);
 
   useEffect(() => {
+    invoke<number>("current_osd_duration")
+      .then((value) => {
+        if (typeof value === "number" && value >= 500 && value <= 10_000) {
+          setOsdDuration(value);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
     persistOsdEnabled(osdEnabled);
     Object.entries(osdEnabled).forEach(([key, enabled]) => {
       void invoke("set_osd_enabled", { key, enabled });
@@ -446,6 +469,11 @@ function SettingsView() {
   useEffect(() => {
     void invoke("set_osd_position", { position: osdPosition });
   }, [osdPosition]);
+
+  const changeDuration = (ms: number) => {
+    setOsdDuration(ms);
+    void invoke("set_osd_duration", { durationMs: ms }).catch(() => {});
+  };
 
   useEffect(() => {
     applyThemeToRoot(theme);
@@ -545,6 +573,22 @@ function SettingsView() {
             <span className="position-cell-dot" />
           </button>
         ))}
+      </section>
+
+      <section className="duration-row" aria-label={text.duration}>
+        <span className="duration-row-label">{text.duration}</span>
+        <input
+          type="range"
+          min={500}
+          max={5000}
+          step={100}
+          value={osdDuration}
+          onChange={(event) => changeDuration(Number(event.currentTarget.value))}
+          aria-valuetext={`${(osdDuration / 1000).toFixed(1)}s`}
+        />
+        <span className="duration-row-value">
+          {(osdDuration / 1000).toFixed(1)}s
+        </span>
       </section>
 
       <section className="theme-section" aria-label={text.theme}>
