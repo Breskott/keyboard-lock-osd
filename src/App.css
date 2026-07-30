@@ -106,8 +106,8 @@ button {
 .osd-pill.is-on {
   background: linear-gradient(
     135deg,
-    rgba(20, 28, 26, 0.82) 0%,
-    rgba(10, 18, 14, 0.86) 100%
+    rgba(20, 22, 28, 0.82) 0%,
+    rgba(10, 12, 16, 0.86) 100%
   );
 }
 
@@ -240,20 +240,21 @@ button {
 /* ============================================================ */
 
 .settings-shell {
-  background: radial-gradient(
+  background:
+    radial-gradient(
       1200px 600px at 0% 0%,
-      color-mix(in srgb, var(--accent) 18%, transparent),
+      var(--accent-soft),
       transparent 60%
     ),
     radial-gradient(
       1000px 500px at 100% 100%,
-      color-mix(in srgb, var(--accent) 14%, transparent),
+      var(--accent-soft),
       transparent 60%
     ),
     var(--bg-shell);
   color: var(--text-primary);
   min-height: 100vh;
-  overflow: hidden;
+  overflow-y: auto;
   padding: 16px 18px;
   transition: background 220ms ease, color 220ms ease;
 }
@@ -482,53 +483,52 @@ button {
   max-width: 760px;
 }
 
-.theme-section-title {
+.theme-row {
+  align-items: center;
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.theme-row-label {
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
-  margin: 0 0 8px;
+  margin-right: 4px;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.theme-grid {
-  background: var(--bg-card);
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
-  display: grid;
-  gap: 6px;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  padding: 10px;
-}
-
-.theme-swatch {
-  align-items: center;
-  border: 2px solid transparent;
-  border-radius: 8px;
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px 4px;
-  transition: border-color 120ms ease, background 120ms ease;
-}
-
-.theme-swatch:hover {
-  background: var(--bg-card-hover);
-}
-
-.theme-swatch.is-selected {
-  border-color: var(--accent);
-}
-
-.theme-swatch-circle {
+.theme-dot {
+  background: transparent;
+  border: none;
   border-radius: 50%;
-  height: 26px;
-  width: 26px;
-  border: 1px solid var(--border-soft-2);
+  cursor: pointer;
+  flex: 0 0 auto;
+  height: 18px;
+  outline: 2px solid transparent;
+  outline-offset: 3px;
+  padding: 0;
+  position: relative;
+  transition:
+    outline-color 120ms ease,
+    transform 120ms ease;
+  width: 18px;
 }
 
-.theme-swatch.is-custom .theme-swatch-circle {
+.theme-dot:hover {
+  transform: scale(1.15);
+}
+
+.theme-dot.is-selected {
+  outline-color: var(--accent);
+}
+
+.theme-dot.is-custom {
   background-image: conic-gradient(
     from 0deg,
     #ff6b6b,
@@ -541,16 +541,9 @@ button {
   );
 }
 
-.theme-swatch-label {
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 600;
-  text-align: center;
-  line-height: 1.15;
-}
-
-.theme-swatch.is-selected .theme-swatch-label {
-  color: var(--text-primary);
+.theme-spacer {
+  flex: 1 1 auto;
+  min-width: 8px;
 }
 
 .theme-custom-row {
@@ -561,13 +554,14 @@ button {
   display: flex;
   gap: 10px;
   margin-top: 6px;
-  padding: 8px 10px;
+  padding: 8px 12px;
 }
 
 .theme-custom-row label {
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .theme-custom-row input[type="color"] {
@@ -595,6 +589,7 @@ button {
     ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: 12px;
   font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 /* ----- key rows (fixed grid for PT-BR etc.) ----- */

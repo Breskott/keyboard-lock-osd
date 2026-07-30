@@ -444,9 +444,7 @@ fn current_theme() -> Theme {
 #[tauri::command]
 fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
     write_theme(&theme);
-    for (label, _) in osd_windows(&app) {
-        let _ = app.emit_to(label, "theme-change", &theme);
-    }
+    let _ = app.emit("theme-change", &theme);
     Ok(())
 }
 

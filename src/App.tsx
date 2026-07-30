@@ -240,27 +240,37 @@ function OsdView() {
   const hideTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
+    const refreshTheme = () => {
+      invoke<Theme>("current_theme")
+        .then((t) => {
+          if (t) {
+            applyThemeToRoot(t);
+          }
+        })
+        .catch(() => {});
+    };
+
     applyThemeToRoot({
       id: "dell",
       name: "Dell Green",
       accent: "#6ee6a4",
       isDark: true,
     });
-
-    invoke<Theme>("current_theme")
-      .then((t) => {
-        if (t) {
-          applyThemeToRoot(t);
-        }
-      })
-      .catch(() => {});
+    refreshTheme();
 
     const unlistenTheme = listen<Theme>("theme-change", (event) => {
       applyThemeToRoot(event.payload);
     });
 
+    // also refresh on each lock-key press so OSD stays in sync even if
+    // a theme-change event was missed (e.g. window recreated)
+    const unlistenLock = listen<LockChangePayload>("lock-key-change", () => {
+      refreshTheme();
+    });
+
     return () => {
       unlistenTheme.then((u) => u());
+      unlistenLock.then((u) => u());
     };
   }, []);
 
@@ -538,31 +548,26 @@ function SettingsView() {
       </section>
 
       <section className="theme-section" aria-label={text.theme}>
-        <h2 className="theme-section-title">{text.theme}</h2>
-        <div className="theme-grid">
+        <div className="theme-row">
+          <span className="theme-row-label">{text.theme}</span>
           {BUILTIN_THEMES.map((t) => (
             <button
               key={t.id}
               type="button"
               aria-label={t.name}
               aria-pressed={theme.id === t.id}
-              className={`theme-swatch ${
+              className={`theme-dot ${
                 theme.id === t.id ? "is-selected" : ""
               }`}
+              style={{ background: t.accent }}
               onClick={() => setTheme(t)}
-            >
-              <span
-                className="theme-swatch-circle"
-                style={{ background: t.accent }}
-              />
-              <span className="theme-swatch-label">{t.name}</span>
-            </button>
+            />
           ))}
           <button
             type="button"
             aria-label={text.themeCustom}
             aria-pressed={isCustomTheme}
-            className={`theme-swatch is-custom ${
+            className={`theme-dot is-custom ${
               isCustomTheme ? "is-selected" : ""
             }`}
             onClick={() =>
@@ -573,16 +578,11 @@ function SettingsView() {
                 isDark: true,
               })
             }
-          >
-            <span className="theme-swatch-circle" />
-            <span className="theme-swatch-label">{text.themeCustom}</span>
-          </button>
-        </div>
-        <div className="theme-custom-row">
-          <label htmlFor="theme-custom-color">{text.customColor}</label>
+          />
+          <span className="theme-spacer" />
           <input
-            id="theme-custom-color"
             type="color"
+            aria-label={text.customColor}
             value={theme.accent}
             onChange={(event) =>
               setTheme({
@@ -593,7 +593,6 @@ function SettingsView() {
               })
             }
           />
-          <span className="theme-custom-value">{theme.accent.toUpperCase()}</span>
         </div>
       </section>
 
