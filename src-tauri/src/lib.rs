@@ -25,10 +25,11 @@ use windows_sys::Win32::System::Console::{
 
 const OSD_WIDTH: u32 = 360;
 const OSD_HEIGHT: u32 = 118;
-const OSD_BOTTOM_GAP: i32 = 118;
+const OSD_EDGE_MARGIN: i32 = 24;
 const OSD_LABEL_PREFIX: &str = "osd-";
 const AUTOSTART_ARG: &str = "--keyboard-lock-osd-autostart";
 const AUTOSTART_PREFERENCE_FILE: &str = "autostart-enabled.txt";
+const OSD_POSITION_PREFERENCE_FILE: &str = "osd-position.txt";
 const PROJECT_REPOSITORY_URL: &str = "https://github.com/coderDJing/keyboard-lock-osd";
 
 static KEY_EVENT_SENDER: OnceLock<Sender<KeyEvent>> = OnceLock::new();
@@ -155,6 +156,48 @@ impl LockKey {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum OsdPosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+impl Default for OsdPosition {
+    fn default() -> Self {
+        Self::BottomCenter
+    }
+}
+
+impl OsdPosition {
+    fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "topLeft" => Some(Self::TopLeft),
+            "topCenter" => Some(Self::TopCenter),
+            "topRight" => Some(Self::TopRight),
+            "bottomLeft" => Some(Self::BottomLeft),
+            "bottomCenter" => Some(Self::BottomCenter),
+            "bottomRight" => Some(Self::BottomRight),
+            _ => None,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::TopLeft => "topLeft",
+            Self::TopCenter => "topCenter",
+            Self::TopRight => "topRight",
+            Self::BottomLeft => "bottomLeft",
+            Self::BottomCenter => "bottomCenter",
+            Self::BottomRight => "bottomRight",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum KeyEventKind {
     Down,
@@ -173,6 +216,7 @@ struct OsdPreferences {
     num: bool,
     scroll: bool,
     suppress_fullscreen: bool,
+    position: OsdPosition,
 }
 
 impl Default for OsdPreferences {
@@ -182,6 +226,7 @@ impl Default for OsdPreferences {
             num: true,
             scroll: true,
             suppress_fullscreen: true,
+            position: OsdPosition::default(),
         }
     }
 }
@@ -210,12 +255,22 @@ impl OsdPreferences {
     fn set_suppress_fullscreen(&mut self, enabled: bool) {
         self.suppress_fullscreen = enabled;
     }
+
+    #[allow(dead_code)]
+    fn position(self) -> OsdPosition {
+        self.position
+    }
+
+    fn set_position(&mut self, position: OsdPosition) {
+        self.position = position;
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 enum UiLanguage {
     En,
     Zh,
+    Pt,
 }
 
 impl UiLanguage {
@@ -223,6 +278,7 @@ impl UiLanguage {
         match self {
             Self::En => "en",
             Self::Zh => "zh",
+            Self::Pt => "pt",
         }
     }
 
@@ -230,6 +286,7 @@ impl UiLanguage {
         match self {
             Self::En => "Open Settings",
             Self::Zh => "打开设置",
+            Self::Pt => "Abrir Configurações",
         }
     }
 
@@ -237,6 +294,7 @@ impl UiLanguage {
         match self {
             Self::En => "Project Repository",
             Self::Zh => "项目地址",
+            Self::Pt => "Repositório do Projeto",
         }
     }
 
@@ -244,6 +302,7 @@ impl UiLanguage {
         match self {
             Self::En => "Check for Updates",
             Self::Zh => "检查更新",
+            Self::Pt => "Verificar Atualizações",
         }
     }
 
@@ -251,6 +310,7 @@ impl UiLanguage {
         match self {
             Self::En => "Quit",
             Self::Zh => "退出",
+            Self::Pt => "Sair",
         }
     }
 }
@@ -339,6 +399,20 @@ fn set_osd_enabled(key: String, enabled: bool) -> Result<(), String> {
 #[tauri::command]
 fn set_suppress_fullscreen_osd(enabled: bool) {
     write_suppress_fullscreen_osd(enabled);
+}
+
+#[tauri::command]
+fn current_osd_position() -> String {
+    read_osd_position().id().to_string()
+}
+
+#[tauri::command]
+fn set_osd_position(app: AppHandle, position: String) -> Result<(), String> {
+    let position = OsdPosition::from_id(&position)
+        .ok_or_else(|| format!("Unknown OSD position: {position}"))?;
+    write_osd_position(position);
+    reposition_all_osd_windows(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -450,6 +524,8 @@ pub fn run() {
             preview_osd,
             set_osd_enabled,
             set_suppress_fullscreen_osd,
+            current_osd_position,
+            set_osd_position,
             current_autostart_enabled,
             set_autostart_enabled,
             current_language,
@@ -526,6 +602,7 @@ fn spawn_manual_update_check(app: AppHandle) {
         let (checking, found, not_found, failed, installing) = match language {
             UiLanguage::En => ("Checking for updates...", "Update available", "Already up to date", "Update check failed", "Installing update..."),
             UiLanguage::Zh => ("正在检查更新...", "发现新版本", "已是最新版本", "检查更新失败", "正在安装更新..."),
+            UiLanguage::Pt => ("Verificando atualizações...", "Atualização disponível", "Já está atualizado", "Falha ao verificar atualização", "Instalando atualização..."),
         };
 
         show_dynamic_toast(&app, "Keyboard Lock OSD", checking);
@@ -587,6 +664,7 @@ fn show_startup_tray_toast(app: &AppHandle) {
         None
     };
     let js = toast_eval_script(&payload);
+    let position = read_osd_position();
 
     for (_, window) in osd_windows(app) {
         if let Some(monitor) = window.current_monitor().ok().flatten() {
@@ -594,7 +672,7 @@ fn show_startup_tray_toast(app: &AppHandle) {
                 let _ = window.hide();
                 continue;
             }
-            let _ = position_osd_on_monitor(&window, &monitor);
+            let _ = position_osd_on_monitor(&window, &monitor, position);
             reveal_osd_window(&window);
             let w = window.clone();
             let js_clone = js.clone();
@@ -614,6 +692,10 @@ fn startup_tray_toast_payload(language: UiLanguage) -> StartupToastPayload {
         UiLanguage::Zh => StartupToastPayload {
             title: "Keyboard Lock OSD",
             message: "已启动并最小化到托盘",
+        },
+        UiLanguage::Pt => StartupToastPayload {
+            title: "Indicador de Teclas de Bloqueio",
+            message: "Iniciado e minimizado na bandeja",
         },
     }
 }
@@ -789,6 +871,7 @@ fn show_osd(app: &AppHandle, key: LockKey, enabled: bool) {
         None
     };
     let js = osd_eval_script("lock", &payload);
+    let position = read_osd_position();
 
     for (_, window) in osd_windows(app) {
         if let Some(monitor) = window.current_monitor().ok().flatten() {
@@ -796,7 +879,7 @@ fn show_osd(app: &AppHandle, key: LockKey, enabled: bool) {
                 let _ = window.hide();
                 continue;
             }
-            let _ = position_osd_on_monitor(&window, &monitor);
+            let _ = position_osd_on_monitor(&window, &monitor, position);
             reveal_osd_window(&window);
             let w = window.clone();
             let js_clone = js.clone();
@@ -845,6 +928,7 @@ fn show_dynamic_toast(app: &AppHandle, title: &str, message: &str) {
     } else {
         None
     };
+    let position = read_osd_position();
 
     for (_, window) in osd_windows(app) {
         if let Some(monitor) = window.current_monitor().ok().flatten() {
@@ -852,7 +936,7 @@ fn show_dynamic_toast(app: &AppHandle, title: &str, message: &str) {
                 let _ = window.hide();
                 continue;
             }
-            let _ = position_osd_on_monitor(&window, &monitor);
+            let _ = position_osd_on_monitor(&window, &monitor, position);
             reveal_osd_window(&window);
             let w = window.clone();
             let js_clone = js.clone();
@@ -959,6 +1043,8 @@ fn language_from_locale(locale: &str) -> UiLanguage {
     let normalized = locale.to_ascii_lowercase();
     if normalized.starts_with("zh") {
         UiLanguage::Zh
+    } else if normalized.starts_with("pt") {
+        UiLanguage::Pt
     } else {
         UiLanguage::En
     }
@@ -992,17 +1078,69 @@ fn preference_path(file_name: &str) -> PathBuf {
 fn position_osd_on_monitor(
     window: &tauri::WebviewWindow,
     monitor: &tauri::Monitor,
+    position: OsdPosition,
 ) -> tauri::Result<()> {
     let work_area = monitor.work_area();
     let scale_factor = monitor.scale_factor();
     let width = (OSD_WIDTH as f64 * scale_factor).round() as i32;
     let height = (OSD_HEIGHT as f64 * scale_factor).round() as i32;
-    let bottom_gap = (OSD_BOTTOM_GAP as f64 * scale_factor).round() as i32;
+    let margin = (OSD_EDGE_MARGIN as f64 * scale_factor).round() as i32;
+    let work_x = work_area.position.x;
+    let work_y = work_area.position.y;
+    let work_w = work_area.size.width as i32;
+    let work_h = work_area.size.height as i32;
 
-    let x = work_area.position.x + ((work_area.size.width as i32 - width) / 2);
-    let y = work_area.position.y + work_area.size.height as i32 - height - bottom_gap;
+    let (x, y) = match position {
+        OsdPosition::TopLeft => (work_x + margin, work_y + margin),
+        OsdPosition::TopCenter => (work_x + (work_w - width) / 2, work_y + margin),
+        OsdPosition::TopRight => (work_x + work_w - width - margin, work_y + margin),
+        OsdPosition::BottomLeft => (work_x + margin, work_y + work_h - height - margin),
+        OsdPosition::BottomCenter => (
+            work_x + (work_w - width) / 2,
+            work_y + work_h - height - margin,
+        ),
+        OsdPosition::BottomRight => (
+            work_x + work_w - width - margin,
+            work_y + work_h - height - margin,
+        ),
+    };
 
     window.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }))
+}
+
+fn reposition_all_osd_windows(app: &AppHandle) {
+    let position = read_osd_position();
+    for (_, window) in osd_windows(app) {
+        if let Some(monitor) = window.current_monitor().ok().flatten() {
+            let _ = position_osd_on_monitor(&window, &monitor, position);
+        }
+    }
+}
+
+fn read_osd_position() -> OsdPosition {
+    let value = fs::read_to_string(osd_position_preference_path()).ok();
+    value
+        .as_deref()
+        .and_then(|raw| OsdPosition::from_id(raw.trim()))
+        .unwrap_or_default()
+}
+
+fn write_osd_position(position: OsdPosition) {
+    if let Ok(mut preferences) = OSD_PREFERENCES
+        .get_or_init(|| Mutex::new(OsdPreferences::default()))
+        .lock()
+    {
+        preferences.set_position(position);
+    }
+    let path = osd_position_preference_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, position.id());
+}
+
+fn osd_position_preference_path() -> PathBuf {
+    preference_path(OSD_POSITION_PREFERENCE_FILE)
 }
 
 
@@ -1036,7 +1174,7 @@ fn create_osd_windows_for_monitors(app: &AppHandle) {
     for (index, monitor) in monitors.iter().enumerate() {
         let label = format!("{OSD_LABEL_PREFIX}{index}");
         if let Some(window) = create_osd_window(app, &label) {
-            let _ = position_osd_on_monitor(&window, monitor);
+            let _ = position_osd_on_monitor(&window, monitor, read_osd_position());
         }
     }
 }
@@ -1086,7 +1224,7 @@ fn sync_osd_windows(app: &AppHandle) {
         let label = format!("{OSD_LABEL_PREFIX}{index}");
         if app.get_webview_window(&label).is_none() {
             if let Some(window) = create_osd_window(app, &label) {
-                let _ = position_osd_on_monitor(&window, monitor);
+                let _ = position_osd_on_monitor(&window, monitor, read_osd_position());
             }
         }
     }

@@ -22,3 +22,16 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Rust / Tauri build output
+src-tauri/target/
+src-tauri/gen/
+target/
+
+# Tauri signing keys and build secrets
+*.key
+*.pem
+*.sig
+.env
+.env.*
+

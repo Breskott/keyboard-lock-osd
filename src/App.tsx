@@ -5,7 +5,23 @@ import logoUrl from "./assets/logo.svg";
 import "./App.css";
 
 type LockKeyId = "caps" | "num" | "scroll";
-type Language = "en" | "zh";
+type Language = "en" | "zh" | "pt";
+type OsdPositionId =
+  | "topLeft"
+  | "topCenter"
+  | "topRight"
+  | "bottomLeft"
+  | "bottomCenter"
+  | "bottomRight";
+
+const OSD_POSITIONS: OsdPositionId[] = [
+  "topLeft",
+  "topCenter",
+  "topRight",
+  "bottomLeft",
+  "bottomCenter",
+  "bottomRight",
+];
 
 type LockChangePayload = {
   key: LockKeyId;
@@ -84,7 +100,12 @@ const copy = {
     startup: "Startup",
     startAtLogin: "Start at login",
     position: "Position",
-    bottomCenter: "Bottom center",
+    positionTopLeft: "Top left",
+    positionTopCenter: "Top center",
+    positionTopRight: "Top right",
+    positionBottomLeft: "Bottom left",
+    positionBottomCenter: "Bottom center",
+    positionBottomRight: "Bottom right",
     animation: "Animation",
     fade: "Fade",
     hideInFullscreen: "Hide OSD in fullscreen",
@@ -101,10 +122,37 @@ const copy = {
     startup: "开机启动",
     startAtLogin: "开机自启",
     position: "位置",
-    bottomCenter: "屏幕中下方",
+    positionTopLeft: "左上",
+    positionTopCenter: "顶部居中",
+    positionTopRight: "右上",
+    positionBottomLeft: "左下",
+    positionBottomCenter: "底部居中",
+    positionBottomRight: "右下",
     animation: "动画",
     fade: "淡入淡出",
     hideInFullscreen: "全屏时不显示浮层",
+  },
+  pt: {
+    title: "Indicador de Teclas de Bloqueio",
+    subtitle: "Indicador na tela para Caps/Num/Scroll Lock",
+    osd: "OSD",
+    preview: "Visualizar",
+    status: "Estado atual",
+    on: "ATIVADO",
+    off: "DESATIVADO",
+    show: "Mostrar OSD",
+    startup: "Inicialização",
+    startAtLogin: "Iniciar com o Windows",
+    position: "Posição na tela",
+    positionTopLeft: "Superior esquerdo",
+    positionTopCenter: "Superior central",
+    positionTopRight: "Superior direito",
+    positionBottomLeft: "Inferior esquerdo",
+    positionBottomCenter: "Inferior central",
+    positionBottomRight: "Inferior direito",
+    animation: "Animação",
+    fade: "Esmaecer",
+    hideInFullscreen: "Ocultar OSD em tela cheia",
   },
 };
 
@@ -124,7 +172,7 @@ function OsdView() {
   const hideTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
-    const showNotice = (nextNotice: OsdNotice, duration = 1_150) => {
+    const showNotice = (nextNotice: OsdNotice, duration = 1_400) => {
       window.clearTimeout(hideTimer.current);
       setNotice(nextNotice);
       setVisible(true);
@@ -135,7 +183,7 @@ function OsdView() {
     };
 
     window.__KEYBOARD_LOCK_OSD_SHOW = (nextNotice) =>
-      showNotice(nextNotice, nextNotice.kind === "toast" ? 2_400 : 1_150);
+      showNotice(nextNotice, nextNotice.kind === "toast" ? 2_400 : 1_400);
 
     const setup = async () => {
       const unlistenLock = await listen<LockChangePayload>(
@@ -168,24 +216,23 @@ function OsdView() {
     };
   }, []);
 
+  const isLock = notice?.kind === "lock";
+  const lockEnabled = isLock && notice.payload.enabled;
+
   return (
     <main className="osd-stage" aria-live="polite">
       <div
         className={`osd-pill ${notice?.kind === "toast" ? "toast" : ""} ${
           visible && notice ? "is-visible" : ""
-        }`}
+        } ${isLock ? (lockEnabled ? "is-on" : "is-off") : ""}`}
       >
-        {notice?.kind === "lock" && (
+        {isLock && (
           <>
             <LockIcon icon={notice.payload.icon} enabled={notice.payload.enabled} />
             <div className="osd-copy">
-              <span className="osd-key">{notice.payload.abbreviation}</span>
-              <span
-                className={
-                  notice.payload.enabled ? "osd-state on" : "osd-state off"
-                }
-              >
-                {notice.payload.enabled ? "ON" : "OFF"}
+              <span className="osd-key-name">{notice.payload.name}</span>
+              <span className={lockEnabled ? "osd-state on" : "osd-state off"}>
+                {lockEnabled ? "ON" : "OFF"}
               </span>
             </div>
           </>
@@ -212,6 +259,7 @@ function SettingsView() {
   const [osdEnabled, setOsdEnabled] = useState<OsdEnabledMap>(() =>
     readStoredOsdEnabled(),
   );
+  const [osdPosition, setOsdPosition] = useState<OsdPositionId>("bottomCenter");
   const text = copy[language];
 
   useEffect(() => {
@@ -257,6 +305,16 @@ function SettingsView() {
   }, []);
 
   useEffect(() => {
+    invoke<string>("current_osd_position")
+      .then((value) => {
+        if (isOsdPosition(value)) {
+          setOsdPosition(value);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
     persistOsdEnabled(osdEnabled);
     Object.entries(osdEnabled).forEach(([key, enabled]) => {
       void invoke("set_osd_enabled", { key, enabled });
@@ -269,6 +327,10 @@ function SettingsView() {
       enabled: suppressFullscreenOsd,
     });
   }, [suppressFullscreenOsd]);
+
+  useEffect(() => {
+    void invoke("set_osd_position", { position: osdPosition });
+  }, [osdPosition]);
 
   const enabledCount = useMemo(
     () => states.filter((state) => state.enabled).length,
@@ -337,14 +399,27 @@ function SettingsView() {
             {enabledCount}/{states.length}
           </strong>
         </div>
-        <div>
+        <div className="status-band-position">
           <span>{text.position}</span>
-          <strong>{text.bottomCenter}</strong>
+          <strong>{positionLabel(text, osdPosition)}</strong>
         </div>
-        <div>
-          <span>{text.animation}</span>
-          <strong>{text.fade}</strong>
-        </div>
+      </section>
+
+      <section className="position-picker" aria-label={text.position}>
+        {OSD_POSITIONS.map((id) => (
+          <button
+            key={id}
+            type="button"
+            aria-label={positionLabel(text, id)}
+            aria-pressed={osdPosition === id}
+            className={`position-cell ${
+              osdPosition === id ? "is-selected" : ""
+            }`}
+            onClick={() => setOsdPosition(id)}
+          >
+            <span className="position-cell-dot" />
+          </button>
+        ))}
       </section>
 
       <section className="settings-grid" aria-label={text.osd}>
@@ -436,11 +511,37 @@ function persistBoolean(key: string, value: boolean) {
 }
 
 function isLanguage(value: string): value is Language {
-  return value === "en" || value === "zh";
+  return value === "en" || value === "zh" || value === "pt";
+}
+
+function isOsdPosition(value: string): value is OsdPositionId {
+  return (OSD_POSITIONS as string[]).includes(value);
 }
 
 function detectBrowserLanguage(): Language {
-  return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+  const lang = navigator.language.toLowerCase();
+  if (lang.startsWith("zh")) return "zh";
+  if (lang.startsWith("pt")) return "pt";
+  return "en";
+}
+
+type TextPack = (typeof copy)[Language];
+
+function positionLabel(text: TextPack, id: OsdPositionId): string {
+  switch (id) {
+    case "topLeft":
+      return text.positionTopLeft;
+    case "topCenter":
+      return text.positionTopCenter;
+    case "topRight":
+      return text.positionTopRight;
+    case "bottomLeft":
+      return text.positionBottomLeft;
+    case "bottomCenter":
+      return text.positionBottomCenter;
+    case "bottomRight":
+      return text.positionBottomRight;
+  }
 }
 
 export default App;
