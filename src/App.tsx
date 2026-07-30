@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import logoUrl from "./assets/logo.svg";
 import "./App.css";
 
@@ -22,6 +22,23 @@ const OSD_POSITIONS: OsdPositionId[] = [
   "bottomCenter",
   "bottomRight",
 ];
+
+type Theme = {
+  id: string;
+  name: string;
+  accent: string;
+  isDark: boolean;
+};
+
+const BUILTIN_THEMES: Theme[] = [
+  { id: "dell", name: "Dell Green", accent: "#6ee6a4", isDark: true },
+  { id: "blue", name: "Midnight", accent: "#6ea8ff", isDark: true },
+  { id: "orange", name: "Sunset", accent: "#ffa86e", isDark: true },
+  { id: "purple", name: "Royal", accent: "#c66eff", isDark: true },
+  { id: "rose", name: "Rose", accent: "#ff7eb6", isDark: true },
+];
+
+const CUSTOM_THEME_ID = "custom";
 
 type LockChangePayload = {
   key: LockKeyId;
@@ -86,6 +103,7 @@ const defaultOsdEnabled: OsdEnabledMap = {
 
 const osdEnabledStorageKey = "keyboard-lock-osd.enabledKeys";
 const suppressFullscreenStorageKey = "keyboard-lock-osd.suppressFullscreen";
+const themeStorageKey = "keyboard-lock-osd.theme";
 
 const copy = {
   en: {
@@ -94,8 +112,6 @@ const copy = {
     osd: "OSD",
     preview: "Preview",
     status: "Current state",
-    on: "ON",
-    off: "OFF",
     show: "Show OSD",
     startup: "Startup",
     startAtLogin: "Start at login",
@@ -109,6 +125,9 @@ const copy = {
     animation: "Animation",
     fade: "Fade",
     hideInFullscreen: "Hide OSD in fullscreen",
+    theme: "Theme",
+    themeCustom: "Custom",
+    customColor: "Custom color",
   },
   zh: {
     title: "Keyboard Lock OSD",
@@ -116,8 +135,6 @@ const copy = {
     osd: "屏幕浮层",
     preview: "预览",
     status: "当前状态",
-    on: "开",
-    off: "关",
     show: "显示浮层",
     startup: "开机启动",
     startAtLogin: "开机自启",
@@ -131,6 +148,9 @@ const copy = {
     animation: "动画",
     fade: "淡入淡出",
     hideInFullscreen: "全屏时不显示浮层",
+    theme: "主题",
+    themeCustom: "自定义",
+    customColor: "自定义颜色",
   },
   pt: {
     title: "Indicador de Teclas de Bloqueio",
@@ -138,8 +158,6 @@ const copy = {
     osd: "OSD",
     preview: "Visualizar",
     status: "Estado atual",
-    on: "ATIVADO",
-    off: "DESATIVADO",
     show: "Mostrar OSD",
     startup: "Inicialização",
     startAtLogin: "Iniciar com o Windows",
@@ -153,6 +171,9 @@ const copy = {
     animation: "Animação",
     fade: "Esmaecer",
     hideInFullscreen: "Ocultar OSD em tela cheia",
+    theme: "Tema",
+    themeCustom: "Personalizado",
+    customColor: "Cor personalizada",
   },
 };
 
@@ -166,10 +187,82 @@ function App() {
   return <SettingsView />;
 }
 
+function applyThemeToRoot(theme: Theme) {
+  const root = document.documentElement;
+  root.style.setProperty("--accent", theme.accent);
+  // light/dark variants derive accent soft variants via color-mix in CSS
+  root.setAttribute("data-theme", theme.isDark ? "dark" : "light");
+  // also pre-compute soft variants for components that need them
+  const soft = hexToRgba(theme.accent, 0.16);
+  const soft2 = hexToRgba(theme.accent, 0.32);
+  const bright = lightenHex(theme.accent, 0.3);
+  root.style.setProperty("--accent-soft", soft);
+  root.style.setProperty("--accent-soft-2", soft2);
+  root.style.setProperty("--accent-bright", bright);
+  root.style.setProperty("--accent-text", theme.accent);
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const clean = hex.replace("#", "");
+  const full =
+    clean.length === 3
+      ? clean
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : clean;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function lightenHex(hex: string, amount: number): string {
+  const clean = hex.replace("#", "");
+  const full =
+    clean.length === 3
+      ? clean
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : clean;
+  const r = Math.min(255, Math.round(parseInt(full.slice(0, 2), 16) + 255 * amount));
+  const g = Math.min(255, Math.round(parseInt(full.slice(2, 4), 16) + 255 * amount));
+  const b = Math.min(255, Math.round(parseInt(full.slice(4, 6), 16) + 255 * amount));
+  return `#${[r, g, b]
+    .map((v) => v.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
 function OsdView() {
   const [notice, setNotice] = useState<OsdNotice | null>(null);
   const [visible, setVisible] = useState(false);
   const hideTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    applyThemeToRoot({
+      id: "dell",
+      name: "Dell Green",
+      accent: "#6ee6a4",
+      isDark: true,
+    });
+
+    invoke<Theme>("current_theme")
+      .then((t) => {
+        if (t) {
+          applyThemeToRoot(t);
+        }
+      })
+      .catch(() => {});
+
+    const unlistenTheme = listen<Theme>("theme-change", (event) => {
+      applyThemeToRoot(event.payload);
+    });
+
+    return () => {
+      unlistenTheme.then((u) => u());
+    };
+  }, []);
 
   useEffect(() => {
     const showNotice = (nextNotice: OsdNotice, duration = 1_400) => {
@@ -260,6 +353,7 @@ function SettingsView() {
     readStoredOsdEnabled(),
   );
   const [osdPosition, setOsdPosition] = useState<OsdPositionId>("bottomCenter");
+  const [theme, setTheme] = useState<Theme>(readStoredTheme);
   const text = copy[language];
 
   useEffect(() => {
@@ -315,6 +409,17 @@ function SettingsView() {
   }, []);
 
   useEffect(() => {
+    invoke<Theme>("current_theme")
+      .then((t) => {
+        if (t) {
+          setTheme(t);
+          applyThemeToRoot(t);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
     persistOsdEnabled(osdEnabled);
     Object.entries(osdEnabled).forEach(([key, enabled]) => {
       void invoke("set_osd_enabled", { key, enabled });
@@ -331,6 +436,14 @@ function SettingsView() {
   useEffect(() => {
     void invoke("set_osd_position", { position: osdPosition });
   }, [osdPosition]);
+
+  useEffect(() => {
+    applyThemeToRoot(theme);
+    persistTheme(theme);
+    void invoke("set_theme", { theme });
+    // broadcast to OSD windows
+    void emit("theme-change", theme);
+  }, [theme]);
 
   const enabledCount = useMemo(
     () => states.filter((state) => state.enabled).length,
@@ -356,6 +469,8 @@ function SettingsView() {
       .catch(() => setAutostartEnabled(previous));
   };
 
+  const isCustomTheme = !BUILTIN_THEMES.some((t) => t.id === theme.id);
+
   return (
     <main className="settings-shell">
       <header className="settings-header">
@@ -377,7 +492,7 @@ function SettingsView() {
             onChange={(event) => toggleAutostart(event.currentTarget.checked)}
           />
           <span>{text.startAtLogin}</span>
-          <strong>{autostartEnabled ?? true ? text.on : text.off}</strong>
+          <strong>{autostartEnabled ?? true ? "ON" : "OFF"}</strong>
         </label>
         <label className="option-toggle">
           <input
@@ -388,7 +503,7 @@ function SettingsView() {
             }
           />
           <span>{text.hideInFullscreen}</span>
-          <strong>{suppressFullscreenOsd ? text.on : text.off}</strong>
+          <strong>{suppressFullscreenOsd ? "ON" : "OFF"}</strong>
         </label>
       </section>
 
@@ -422,6 +537,66 @@ function SettingsView() {
         ))}
       </section>
 
+      <section className="theme-section" aria-label={text.theme}>
+        <h2 className="theme-section-title">{text.theme}</h2>
+        <div className="theme-grid">
+          {BUILTIN_THEMES.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              aria-label={t.name}
+              aria-pressed={theme.id === t.id}
+              className={`theme-swatch ${
+                theme.id === t.id ? "is-selected" : ""
+              }`}
+              onClick={() => setTheme(t)}
+            >
+              <span
+                className="theme-swatch-circle"
+                style={{ background: t.accent }}
+              />
+              <span className="theme-swatch-label">{t.name}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            aria-label={text.themeCustom}
+            aria-pressed={isCustomTheme}
+            className={`theme-swatch is-custom ${
+              isCustomTheme ? "is-selected" : ""
+            }`}
+            onClick={() =>
+              setTheme({
+                id: CUSTOM_THEME_ID,
+                name: text.themeCustom,
+                accent: theme.accent,
+                isDark: true,
+              })
+            }
+          >
+            <span className="theme-swatch-circle" />
+            <span className="theme-swatch-label">{text.themeCustom}</span>
+          </button>
+        </div>
+        <div className="theme-custom-row">
+          <label htmlFor="theme-custom-color">{text.customColor}</label>
+          <input
+            id="theme-custom-color"
+            type="color"
+            value={theme.accent}
+            onChange={(event) =>
+              setTheme({
+                id: CUSTOM_THEME_ID,
+                name: text.themeCustom,
+                accent: event.currentTarget.value,
+                isDark: true,
+              })
+            }
+          />
+          <span className="theme-custom-value">{theme.accent.toUpperCase()}</span>
+        </div>
+      </section>
+
       <section className="settings-grid" aria-label={text.osd}>
         {states.map((state) => (
           <article className="key-row" key={state.key}>
@@ -431,7 +606,7 @@ function SettingsView() {
               <strong>{state.name}</strong>
             </div>
             <span className={state.enabled ? "state-chip on" : "state-chip off"}>
-              {state.enabled ? text.on : text.off}
+              {state.enabled ? "ON" : "OFF"}
             </span>
             <label className="toggle">
               <input
@@ -495,6 +670,29 @@ function readStoredOsdEnabled(): OsdEnabledMap {
 
 function persistOsdEnabled(settings: OsdEnabledMap) {
   window.localStorage.setItem(osdEnabledStorageKey, JSON.stringify(settings));
+}
+
+function readStoredTheme(): Theme {
+  try {
+    const raw = window.localStorage.getItem(themeStorageKey);
+    if (!raw) return BUILTIN_THEMES[0];
+    const parsed = JSON.parse(raw) as Partial<Theme>;
+    if (
+      typeof parsed.accent === "string" &&
+      typeof parsed.id === "string" &&
+      typeof parsed.name === "string" &&
+      typeof parsed.isDark === "boolean"
+    ) {
+      return parsed as Theme;
+    }
+    return BUILTIN_THEMES[0];
+  } catch {
+    return BUILTIN_THEMES[0];
+  }
+}
+
+function persistTheme(theme: Theme) {
+  window.localStorage.setItem(themeStorageKey, JSON.stringify(theme));
 }
 
 function readStoredBoolean(key: string, fallback: boolean) {

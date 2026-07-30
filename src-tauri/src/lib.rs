@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
     path::PathBuf,
@@ -30,6 +30,7 @@ const OSD_LABEL_PREFIX: &str = "osd-";
 const AUTOSTART_ARG: &str = "--keyboard-lock-osd-autostart";
 const AUTOSTART_PREFERENCE_FILE: &str = "autostart-enabled.txt";
 const OSD_POSITION_PREFERENCE_FILE: &str = "osd-position.txt";
+const THEME_PREFERENCE_FILE: &str = "theme.json";
 const PROJECT_REPOSITORY_URL: &str = "https://github.com/coderDJing/keyboard-lock-osd";
 
 static KEY_EVENT_SENDER: OnceLock<Sender<KeyEvent>> = OnceLock::new();
@@ -194,6 +195,26 @@ impl OsdPosition {
             Self::BottomLeft => "bottomLeft",
             Self::BottomCenter => "bottomCenter",
             Self::BottomRight => "bottomRight",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Theme {
+    id: String,
+    name: String,
+    accent: String,
+    is_dark: bool,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            id: "dell".to_string(),
+            name: "Dell Green".to_string(),
+            accent: "#6ee6a4".to_string(),
+            is_dark: true,
         }
     }
 }
@@ -416,6 +437,20 @@ fn set_osd_position(app: AppHandle, position: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn current_theme() -> Theme {
+    read_theme()
+}
+
+#[tauri::command]
+fn set_theme(app: AppHandle, theme: Theme) -> Result<(), String> {
+    write_theme(&theme);
+    for (label, _) in osd_windows(&app) {
+        let _ = app.emit_to(label, "theme-change", &theme);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn current_autostart_enabled(app: AppHandle) -> bool {
     if cfg!(debug_assertions) {
         return read_autostart_preference().unwrap_or(true);
@@ -526,6 +561,8 @@ pub fn run() {
             set_suppress_fullscreen_osd,
             current_osd_position,
             set_osd_position,
+            current_theme,
+            set_theme,
             current_autostart_enabled,
             set_autostart_enabled,
             current_language,
@@ -1141,6 +1178,28 @@ fn write_osd_position(position: OsdPosition) {
 
 fn osd_position_preference_path() -> PathBuf {
     preference_path(OSD_POSITION_PREFERENCE_FILE)
+}
+
+fn read_theme() -> Theme {
+    let path = theme_preference_path();
+    let raw = fs::read_to_string(&path).ok();
+    raw.as_deref()
+        .and_then(|s| serde_json::from_str::<Theme>(s.trim()).ok())
+        .unwrap_or_default()
+}
+
+fn write_theme(theme: &Theme) {
+    let path = theme_preference_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(theme) {
+        let _ = fs::write(path, json);
+    }
+}
+
+fn theme_preference_path() -> PathBuf {
+    preference_path(THEME_PREFERENCE_FILE)
 }
 
 
